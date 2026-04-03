@@ -46,8 +46,6 @@ class EventArticle:
     summary: str
     url: str
     nyt_url: str
-    wikipedia_url: str
-    wikipedia_label: str = "Wikipedia search"
     source_label: str = "NYT article"
 
 
@@ -382,7 +380,6 @@ def nyt_doc_to_article(doc: dict, iso_date: str) -> EventArticle:
         summary=nyt_doc_summary(doc),
         url=doc["web_url"],
         nyt_url=nyt_archive_url(headline, iso_date),
-        wikipedia_url=wikipedia_search_url(headline),
     )
 
 
@@ -433,8 +430,6 @@ def select_event(payload: dict, iso_date: str) -> Event:
                 summary=truncate_words(text, MAX_SUMMARY_WORDS),
                 url=wikipedia_page_url(page),
                 nyt_url=nyt_archive_url(query, iso_date),
-                wikipedia_url=wikipedia_page_url(page),
-                wikipedia_label="Wikipedia event",
                 source_label="Wikipedia event",
             )
         ],
@@ -516,8 +511,7 @@ def event_block(label: str, iso_date: str, event: Event) -> str:
             f"{summary_html}"
             '<div class="event-link">'
             f'<a href="{escape(article.url)}">{escape(article.source_label)}</a> · '
-            f'<a href="{escape(article.nyt_url)}">NYT archive search</a> · '
-            f'<a href="{escape(article.wikipedia_url)}">{escape(article.wikipedia_label)}</a>'
+            f'<a href="{escape(article.nyt_url)}">NYT archive search</a>'
             "</div>"
             "</div>"
         )
@@ -526,7 +520,7 @@ def event_block(label: str, iso_date: str, event: Event) -> str:
         f'<div class="event-date">{escape(label)} · {escape(format_date(iso_date))}</div>'
         + '<details class="event-disclosure">'
         + '<summary class="event-summary">'
-        + '<span class="event-summary-label">Titles</span>'
+        + '<span class="event-summary-label">Click to expand article titles</span>'
         + f'<span class="event-summary-count">{len(event.articles)}</span>'
         + f'<span class="event-title-list">{"".join(title_items)}</span>'
         + "</summary>"
@@ -1003,10 +997,33 @@ def render_html(rows: list[dict]) -> str:
       cursor: pointer;
       padding: 12px 14px;
       list-style: none;
+      position: relative;
+      padding-right: 44px;
     }}
 
     .event-summary::-webkit-details-marker {{
       display: none;
+    }}
+
+    .event-summary::after {{
+      content: "+";
+      position: absolute;
+      top: 12px;
+      right: 14px;
+      width: 22px;
+      height: 22px;
+      border-radius: 999px;
+      border: 1px solid rgba(189, 122, 54, 0.26);
+      color: var(--accent);
+      font-size: 1rem;
+      font-weight: 700;
+      line-height: 20px;
+      text-align: center;
+      background: rgba(189, 122, 54, 0.08);
+    }}
+
+    .event-disclosure[open] .event-summary::after {{
+      content: "−";
     }}
 
     .event-summary-label,
@@ -1016,8 +1033,9 @@ def render_html(rows: list[dict]) -> str:
     }}
 
     .event-summary-label {{
-      color: var(--muted);
-      font-size: 0.76rem;
+      color: var(--accent);
+      font-size: 0.78rem;
+      font-weight: 700;
       letter-spacing: 0.08em;
       text-transform: uppercase;
     }}
@@ -1173,7 +1191,7 @@ def render_html(rows: list[dict]) -> str:
     <footer>
       <div>Generated locally on {escape(generated_on)}.</div>
       <div class="source-list">
-        <div>Sources: <a href="https://www.hebcal.com/hebcal?cfg=json&year=2025&maj=on&month=x&c=off&geo=none&m=50&s=off">Hebcal</a>, <a href="https://www.extremeweatherwatch.com/cities/chicago/day/april-13">Extreme Weather Watch</a>, <a href="https://www.ncei.noaa.gov/access/services/data/v1?dataset=daily-summaries&stations=USW00094846&startDate=1980-04-01&endDate=1980-04-01&dataTypes=TMAX,TMIN,PRCP,SNOW&units=standard&format=json">NOAA daily summaries</a>, <a href="https://developer.nytimes.com/docs/archive-product/1/overview">New York Times Archive API</a>, <a href="https://developer.nytimes.com/docs/articlesearch-product/1/overview">New York Times Article Search API</a>, <a href="https://api.wikimedia.org/feed/v1/wikipedia/en/onthisday/events/04/13">Wikimedia On This Day events</a>, <a href="{escape(BASE_PRICE_URL)}">Good Eggs</a>, <a href="https://www.officialdata.org/us-cpi">OfficialData CPI table</a>, <a href="https://www.bls.gov/data/inflation_calculator_inside.htm">BLS inflation calculator note</a>.</div>
+        <div>Sources: <a href="https://www.hebcal.com/hebcal?cfg=json&year=2025&maj=on&month=x&c=off&geo=none&m=50&s=off">Hebcal</a>, <a href="https://www.extremeweatherwatch.com/cities/chicago/day/april-13">Extreme Weather Watch</a>, <a href="https://www.ncei.noaa.gov/access/services/data/v1?dataset=daily-summaries&stations=USW00094846&startDate=1980-04-01&endDate=1980-04-01&dataTypes=TMAX,TMIN,PRCP,SNOW&units=standard&format=json">NOAA daily summaries</a>, <a href="https://developer.nytimes.com/docs/archive-product/1/overview">New York Times Archive API</a>, <a href="https://developer.nytimes.com/docs/articlesearch-product/1/overview">New York Times Article Search API</a>, <a href="{escape(BASE_PRICE_URL)}">Good Eggs</a>, <a href="https://www.officialdata.org/us-cpi">OfficialData CPI table</a>, <a href="https://www.bls.gov/data/inflation_calculator_inside.htm">BLS inflation calculator note</a>.</div>
         <div>Calendar note: this uses the first and second daytime festival dates in the diaspora calendar, not the prior evening seder start.</div>
       </div>
     </footer>
