@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+import os
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from html import escape
@@ -11,6 +14,8 @@ from bs4 import BeautifulSoup
 
 
 OUTPUT_FILE = Path("index.html")
+CACHE_DIR = Path(".cache")
+NYT_CACHE_DIR = CACHE_DIR / "nyt"
 BASE_PRICE_URL = (
     "https://www.goodeggs.com/manischewitz/original-passover-matzo/"
     "661ecb091c7d5e001109d36a"
@@ -18,6 +23,9 @@ BASE_PRICE_URL = (
 HEADERS = {"User-Agent": "Codex/1.0"}
 START_YEAR = 2025
 END_YEAR = 1976
+NYT_API_KEY_ENV = "NYT_API_KEY"
+NYT_ARCHIVE_API_URL = "https://api.nytimes.com/svc/archive/v1/{year}/{month}.json"
+NYT_ARTICLE_SEARCH_URL = "https://api.nytimes.com/svc/search/v2/articlesearch.json"
 
 
 @dataclass
@@ -40,11 +48,23 @@ class Event:
     wikipedia_url: str
     wikipedia_label: str = "Wikipedia"
     source_label: str | None = None
-    exact_year: bool = True
+    exact_match: bool = True
 
 
-def get_json(session: requests.Session, url: str) -> dict | list:
-    response = session.get(url, timeout=30)
+def get_json(session: requests.Session, url: str, params: dict | None = None) -> dict | list:
+    for attempt in range(6):
+        response = session.get(url, params=params, timeout=30)
+        if response.status_code != 429:
+            response.raise_for_status()
+            return response.json()
+
+        retry_after = response.headers.get("Retry-After")
+        if retry_after and retry_after.isdigit():
+            wait_seconds = int(retry_after)
+        else:
+            wait_seconds = min(60, 10 * (attempt + 1))
+        time.sleep(wait_seconds)
+
     response.raise_for_status()
     return response.json()
 
@@ -161,6 +181,16 @@ def clean_event_text(text: str) -> str:
     )
 
 
+def first_nonempty(*values: object) -> str:
+    for value in values:
+        if value is None:
+            continue
+        text = clean_event_text(str(value))
+        if text:
+            return text
+    return ""
+
+
 def wikipedia_page_url(page: dict) -> str:
     content_urls = page.get("content_urls", {})
     desktop_urls = content_urls.get("desktop", {})
@@ -181,6 +211,31 @@ def event_search_query(item: dict) -> str:
     return clean_event_text(item["text"])
 
 
+def require_nyt_api_key() -> str:
+    api_key = os.getenv(NYT_API_KEY_ENV)
+    if api_key:
+        return api_key
+    raise RuntimeError(
+        f"{NYT_API_KEY_ENV} is required to fetch New York Times archive data. "
+        f"Set it in your environment before running {OUTPUT_FILE.name} generation."
+    )
+
+
+def ensure_cache_dirs() -> None:
+    NYT_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def load_cached_json(path: Path) -> dict | list | None:
+    if not path.exists():
+        return None
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def write_cached_json(path: Path, payload: dict | list) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, ensure_ascii=True), encoding="utf-8")
+
+
 def fetch_event_catalog(session: requests.Session, slug: str) -> dict:
     month_name, day_text = slug.split("-")
     month_number = datetime.strptime(month_name, "%B").month
@@ -192,55 +247,152 @@ def fetch_event_catalog(session: requests.Session, slug: str) -> dict:
     return get_json(session, url)
 
 
-def nyt_issue_url(iso_date: str) -> str:
-    dt = datetime.fromisoformat(iso_date)
-    return (
-        "https://www.nytimes.com/issue/todayspaper/"
-        f"{dt.year:04d}/{dt.month:02d}/{dt.day:02d}/todays-new-york-times"
+def fetch_nyt_archive_month(session: requests.Session, year: int, month: int, api_key: str) -> list[dict]:
+    cache_path = NYT_CACHE_DIR / f"archive-{year:04d}-{month:02d}.json"
+    cached = load_cached_json(cache_path)
+    if cached is not None:
+        payload = cached
+    else:
+        payload = get_json(
+            session,
+            NYT_ARCHIVE_API_URL.format(year=year, month=month),
+            params={"api-key": api_key},
+        )
+        write_cached_json(cache_path, payload)
+    return payload["response"]["docs"]
+
+
+def fetch_nyt_articlesearch_day(session: requests.Session, iso_date: str, api_key: str) -> list[dict]:
+    cache_path = NYT_CACHE_DIR / f"articlesearch-{format_search_date(iso_date)}.json"
+    cached = load_cached_json(cache_path)
+    if cached is not None:
+        payload = cached
+    else:
+        date_token = format_search_date(iso_date)
+        payload = get_json(
+            session,
+            NYT_ARTICLE_SEARCH_URL,
+            params={
+                "begin_date": date_token,
+                "end_date": date_token,
+                "fq": 'source:("The New York Times")',
+                "sort": "oldest",
+                "page": 0,
+                "api-key": api_key,
+            },
+        )
+        write_cached_json(cache_path, payload)
+    return payload["response"]["docs"]
+
+
+def docs_for_exact_date(docs: list[dict], iso_date: str) -> list[dict]:
+    return [doc for doc in docs if str(doc.get("pub_date", "")).startswith(iso_date)]
+
+
+def merge_docs(*doc_groups: list[dict]) -> list[dict]:
+    merged: list[dict] = []
+    seen: set[str] = set()
+    for docs in doc_groups:
+        for doc in docs:
+            web_url = doc.get("web_url")
+            if not web_url or web_url in seen:
+                continue
+            seen.add(web_url)
+            merged.append(doc)
+    return merged
+
+
+def print_page_score(print_page: str | None) -> int:
+    if not print_page:
+        return 0
+    digits = "".join(ch for ch in str(print_page) if ch.isdigit())
+    if not digits:
+        return 0
+    return max(0, 20 - int(digits))
+
+
+def score_nyt_doc(doc: dict) -> tuple[int, int]:
+    source = doc.get("source") or ""
+    section = doc.get("section_name") or ""
+    desk = doc.get("news_desk") or ""
+    material = doc.get("type_of_material") or ""
+    document_type = doc.get("document_type") or ""
+    score = 0
+
+    if source == "The New York Times":
+        score += 100
+    if document_type == "article":
+        score += 35
+    if material in {"News", "Front Page", "Article", "News Analysis"}:
+        score += 30
+    if material in {"Blog", "Paid Death Notice", "Obituary", "Review", "Schedule", "Correction"}:
+        score -= 35
+    if section == "Front Page":
+        score += 50
+    if section in {"U.S.", "World", "Business", "New York", "Washington", "NYRegion"}:
+        score += 10
+    if desk in {"National", "Foreign", "Washington", "Business Day", "Metro", "Politics", "Science"}:
+        score += 8
+    if desk in {"Opinion", "Editorial", "OpEd", "Letters", "Obits", "Obituaries"}:
+        score -= 20
+    if section in {"Opinion", "Obituaries"}:
+        score -= 20
+    score += print_page_score(doc.get("print_page"))
+    if first_nonempty(doc.get("abstract"), doc.get("snippet")):
+        score += 4
+
+    headline = first_nonempty(
+        doc.get("headline", {}).get("main"),
+        doc.get("headline", {}).get("print_headline"),
+        doc.get("headline", {}).get("name"),
+    )
+    return score, len(headline)
+
+
+def nyt_doc_headline(doc: dict) -> str:
+    return first_nonempty(
+        doc.get("headline", {}).get("main"),
+        doc.get("headline", {}).get("print_headline"),
+        doc.get("headline", {}).get("name"),
+        doc.get("snippet"),
+        doc.get("abstract"),
     )
 
 
-def fetch_nyt_issue_item(session: requests.Session, iso_date: str) -> Event | None:
-    dt = datetime.fromisoformat(iso_date)
-    if dt.year < 2018:
+def nyt_doc_summary(doc: dict) -> str:
+    headline = nyt_doc_headline(doc)
+    summary = first_nonempty(doc.get("abstract"), doc.get("snippet"))
+    if summary and summary != headline:
+        return f"{headline}. {summary}"
+    return headline
+
+
+def select_nyt_event(session: requests.Session, iso_date: str, archive_docs: list[dict], api_key: str) -> Event | None:
+    exact_archive_docs = docs_for_exact_date(archive_docs, iso_date)
+    candidates = merge_docs(exact_archive_docs)
+    if not candidates:
+        search_docs = fetch_nyt_articlesearch_day(session, iso_date, api_key)
+        exact_search_docs = docs_for_exact_date(search_docs, iso_date)
+        candidates = merge_docs(exact_search_docs)
+        if not candidates and search_docs:
+            # Article Search is date-constrained already; use it as a last exact-day fallback.
+            candidates = merge_docs(search_docs)
+    if not candidates:
         return None
 
-    url = nyt_issue_url(iso_date)
-    response = session.get(url, timeout=30)
-    if response.status_code != 200:
-        return None
-
-    soup = BeautifulSoup(response.text, "html.parser")
-    for anchor in soup.select("a[href]"):
-        href = anchor.get("href", "")
-        if not href.startswith(f"/{dt.year:04d}/"):
-            continue
-        headline_node = anchor.find(["h2", "h3", "h4"])
-        if headline_node is None:
-            continue
-        headline = " ".join(headline_node.get_text(" ", strip=True).split())
-        if not headline:
-            continue
-        article_url = href if href.startswith("http") else f"https://www.nytimes.com{href}"
-        summary = ""
-        for paragraph in anchor.find_all("p"):
-            text = " ".join(paragraph.get_text(" ", strip=True).split())
-            if text and not text.startswith("By "):
-                summary = text
-                break
-        item_text = headline if not summary or summary == headline else f"{headline} {summary}"
-        return Event(
-            year=dt.year,
-            text=item_text,
-            url=article_url,
-            nyt_url=nyt_archive_url(headline, iso_date),
-            tribune_url=tribune_archive_url(headline, iso_date),
-            wikipedia_url=wikipedia_search_url(headline),
-            wikipedia_label="Wikipedia search",
-            source_label="NYT in print",
-        )
-
-    return None
+    chosen = max(candidates, key=score_nyt_doc)
+    headline = nyt_doc_headline(chosen)
+    return Event(
+        year=datetime.fromisoformat(iso_date).year,
+        text=nyt_doc_summary(chosen),
+        url=chosen["web_url"],
+        nyt_url=nyt_archive_url(headline, iso_date),
+        tribune_url=tribune_archive_url(headline, iso_date),
+        wikipedia_url=wikipedia_search_url(headline),
+        wikipedia_label="Wikipedia search",
+        source_label="NYT article",
+        exact_match=True,
+    )
 
 
 def select_event(payload: dict, iso_date: str) -> Event:
@@ -254,14 +406,14 @@ def select_event(payload: dict, iso_date: str) -> Event:
 
     if exact_events:
         chosen = max(exact_events, key=lambda item: (len(item.get("pages", [])), len(item["text"])))
-        exact_year = True
+        exact_match = True
     elif exact_selected:
         chosen = max(exact_selected, key=lambda item: (len(item.get("pages", [])), len(item["text"])))
-        exact_year = True
+        exact_match = True
     else:
         fallback_pool = with_pages(payload.get("selected", [])) or with_pages(payload.get("events", []))
         chosen = min(fallback_pool, key=lambda item: abs(int(item["year"]) - target_year))
-        exact_year = False
+        exact_match = False
 
     page = chosen["pages"][0]
     text = clean_event_text(chosen["text"])
@@ -273,7 +425,7 @@ def select_event(payload: dict, iso_date: str) -> Event:
         nyt_url=nyt_archive_url(query, iso_date),
         tribune_url=tribune_archive_url(query, iso_date),
         wikipedia_url=wikipedia_page_url(page),
-        exact_year=exact_year,
+        exact_match=exact_match,
     )
 
 
@@ -334,10 +486,10 @@ def weather_block(label: str, iso_date: str, weather: Weather) -> str:
 
 def event_block(label: str, iso_date: str, event: Event) -> str:
     fallback_note = ""
-    if not event.exact_year:
+    if not event.exact_match:
         fallback_note = (
             '<div class="source-note">'
-            "Wikipedia does not list a same-year event for this date; archive searches still target the date shown."
+            "The NYT APIs did not return a usable exact-date article here, so this row falls back to a date-matched Wikipedia event."
             "</div>"
         )
     return (
@@ -360,12 +512,28 @@ def event_block(label: str, iso_date: str, event: Event) -> str:
 
 
 def build_rows(session: requests.Session) -> list[dict]:
+    nyt_api_key = require_nyt_api_key()
+    ensure_cache_dirs()
     passover_rows = [fetch_passover_dates(session, year) for year in range(START_YEAR, END_YEAR - 1, -1)]
     unique_slugs = sorted(
         {iso_to_slug(row["day1"]) for row in passover_rows}
         | {iso_to_slug(row["day2"]) for row in passover_rows}
     )
+    unique_months = sorted(
+        {
+            (datetime.fromisoformat(str(row["day1"])).year, datetime.fromisoformat(str(row["day1"])).month)
+            for row in passover_rows
+        }
+        | {
+            (datetime.fromisoformat(str(row["day2"])).year, datetime.fromisoformat(str(row["day2"])).month)
+            for row in passover_rows
+        }
+    )
     weather_cache = {slug: fetch_weather_table(session, slug) for slug in unique_slugs}
+    nyt_archive_cache = {
+        month_key: fetch_nyt_archive_month(session, month_key[0], month_key[1], nyt_api_key)
+        for month_key in unique_months
+    }
     event_cache = {slug: fetch_event_catalog(session, slug) for slug in unique_slugs}
     cpi = fetch_cpi(session)
     base_price = fetch_base_price(session)
@@ -374,11 +542,23 @@ def build_rows(session: requests.Session) -> list[dict]:
     for row in passover_rows:
         day1_slug = iso_to_slug(row["day1"])
         day2_slug = iso_to_slug(row["day2"])
+        day1_dt = datetime.fromisoformat(str(row["day1"]))
+        day2_dt = datetime.fromisoformat(str(row["day2"]))
         day1_weather = weather_cache[day1_slug].get(row["year"]) or fetch_noaa_weather(session, row["day1"])
         day2_weather = weather_cache[day2_slug].get(row["year"]) or fetch_noaa_weather(session, row["day2"])
         estimated_price, cpi_month = price_for_year(base_price, cpi, row["day1"])
-        day1_news = fetch_nyt_issue_item(session, row["day1"]) or select_event(event_cache[day1_slug], row["day1"])
-        day2_news = fetch_nyt_issue_item(session, row["day2"]) or select_event(event_cache[day2_slug], row["day2"])
+        day1_news = select_nyt_event(
+            session,
+            str(row["day1"]),
+            nyt_archive_cache[(day1_dt.year, day1_dt.month)],
+            nyt_api_key,
+        ) or select_event(event_cache[day1_slug], row["day1"])
+        day2_news = select_nyt_event(
+            session,
+            str(row["day2"]),
+            nyt_archive_cache[(day2_dt.year, day2_dt.month)],
+            nyt_api_key,
+        ) or select_event(event_cache[day2_slug], row["day2"])
         rows.append(
             {
                 "year": row["year"],
@@ -883,7 +1063,7 @@ def render_html(rows: list[dict]) -> str:
     <footer>
       <div>Generated locally on {escape(generated_on)}.</div>
       <div class="source-list">
-        <div>Sources: <a href="https://www.hebcal.com/hebcal?cfg=json&year=2025&maj=on&month=x&c=off&geo=none&m=50&s=off">Hebcal</a>, <a href="https://www.extremeweatherwatch.com/cities/chicago/day/april-13">Extreme Weather Watch</a>, <a href="https://www.ncei.noaa.gov/access/services/data/v1?dataset=daily-summaries&stations=USW00094846&startDate=1980-04-01&endDate=1980-04-01&dataTypes=TMAX,TMIN,PRCP,SNOW&units=standard&format=json">NOAA daily summaries</a>, <a href="https://www.nytimes.com/issue/todayspaper/2025/04/13/todays-new-york-times">New York Times in-print issue pages</a>, <a href="https://api.wikimedia.org/feed/v1/wikipedia/en/onthisday/events/04/13">Wikimedia On This Day events</a>, <a href="https://www.nytimes.com/search?dropmab=true&query=Passover&sort=best&startDate=20250413&endDate=20250413">New York Times search archive</a>, <a href="https://chicagotribune.newspapers.com/search/?query=Passover+2025">Chicago Tribune archive</a>, <a href="{escape(BASE_PRICE_URL)}">Good Eggs</a>, <a href="https://www.officialdata.org/us-cpi">OfficialData CPI table</a>, <a href="https://www.bls.gov/data/inflation_calculator_inside.htm">BLS inflation calculator note</a>.</div>
+        <div>Sources: <a href="https://www.hebcal.com/hebcal?cfg=json&year=2025&maj=on&month=x&c=off&geo=none&m=50&s=off">Hebcal</a>, <a href="https://www.extremeweatherwatch.com/cities/chicago/day/april-13">Extreme Weather Watch</a>, <a href="https://www.ncei.noaa.gov/access/services/data/v1?dataset=daily-summaries&stations=USW00094846&startDate=1980-04-01&endDate=1980-04-01&dataTypes=TMAX,TMIN,PRCP,SNOW&units=standard&format=json">NOAA daily summaries</a>, <a href="https://developer.nytimes.com/docs/archive-product/1/overview">New York Times Archive API</a>, <a href="https://developer.nytimes.com/docs/articlesearch-product/1/overview">New York Times Article Search API</a>, <a href="https://api.wikimedia.org/feed/v1/wikipedia/en/onthisday/events/04/13">Wikimedia On This Day events</a>, <a href="https://chicagotribune.newspapers.com/search/?query=Passover+2025">Chicago Tribune archive</a>, <a href="{escape(BASE_PRICE_URL)}">Good Eggs</a>, <a href="https://www.officialdata.org/us-cpi">OfficialData CPI table</a>, <a href="https://www.bls.gov/data/inflation_calculator_inside.htm">BLS inflation calculator note</a>.</div>
         <div>Calendar note: this uses the first and second daytime festival dates in the diaspora calendar, not the prior evening seder start.</div>
       </div>
     </footer>
