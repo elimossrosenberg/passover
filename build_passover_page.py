@@ -26,6 +26,8 @@ END_YEAR = 1976
 NYT_API_KEY_ENV = "NYT_API_KEY"
 NYT_ARCHIVE_API_URL = "https://api.nytimes.com/svc/archive/v1/{year}/{month}.json"
 NYT_ARTICLE_SEARCH_URL = "https://api.nytimes.com/svc/search/v2/articlesearch.json"
+MAX_NYT_ARTICLES = 10
+MAX_SUMMARY_WORDS = 100
 
 
 @dataclass
@@ -39,15 +41,19 @@ class Weather:
 
 
 @dataclass
-class Event:
-    year: int | None
-    text: str
+class EventArticle:
+    title: str
+    summary: str
     url: str
     nyt_url: str
-    tribune_url: str
     wikipedia_url: str
-    wikipedia_label: str = "Wikipedia"
-    source_label: str | None = None
+    wikipedia_label: str = "Wikipedia search"
+    source_label: str = "NYT article"
+
+
+@dataclass
+class Event:
+    articles: list[EventArticle]
     exact_match: bool = True
 
 
@@ -163,11 +169,6 @@ def nyt_archive_url(query: str, iso_date: str) -> str:
     )
 
 
-def tribune_archive_url(query: str, iso_date: str) -> str:
-    year = datetime.fromisoformat(iso_date).year
-    return f"https://chicagotribune.newspapers.com/search/?query={quote_plus(f'{query} {year}')}"
-
-
 def wikipedia_search_url(query: str) -> str:
     return f"https://en.wikipedia.org/wiki/Special:Search?search={quote_plus(query)}"
 
@@ -179,6 +180,13 @@ def clean_event_text(text: str) -> str:
         .replace("(pictured) ", "")
         .strip()
     )
+
+
+def truncate_words(text: str, limit: int) -> str:
+    words = text.split()
+    if len(words) <= limit:
+        return text
+    return " ".join(words[:limit]).rstrip(".,;:") + "..."
 
 
 def first_nonempty(*values: object) -> str:
@@ -361,10 +369,21 @@ def nyt_doc_headline(doc: dict) -> str:
 
 def nyt_doc_summary(doc: dict) -> str:
     headline = nyt_doc_headline(doc)
-    summary = first_nonempty(doc.get("abstract"), doc.get("snippet"))
-    if summary and summary != headline:
-        return f"{headline}. {summary}"
-    return headline
+    summary = first_nonempty(doc.get("abstract"), doc.get("snippet"), doc.get("lead_paragraph"))
+    if not summary or summary == headline:
+        return ""
+    return truncate_words(summary, MAX_SUMMARY_WORDS)
+
+
+def nyt_doc_to_article(doc: dict, iso_date: str) -> EventArticle:
+    headline = nyt_doc_headline(doc)
+    return EventArticle(
+        title=headline,
+        summary=nyt_doc_summary(doc),
+        url=doc["web_url"],
+        nyt_url=nyt_archive_url(headline, iso_date),
+        wikipedia_url=wikipedia_search_url(headline),
+    )
 
 
 def select_nyt_event(session: requests.Session, iso_date: str, archive_docs: list[dict], api_key: str) -> Event | None:
@@ -380,19 +399,8 @@ def select_nyt_event(session: requests.Session, iso_date: str, archive_docs: lis
     if not candidates:
         return None
 
-    chosen = max(candidates, key=score_nyt_doc)
-    headline = nyt_doc_headline(chosen)
-    return Event(
-        year=datetime.fromisoformat(iso_date).year,
-        text=nyt_doc_summary(chosen),
-        url=chosen["web_url"],
-        nyt_url=nyt_archive_url(headline, iso_date),
-        tribune_url=tribune_archive_url(headline, iso_date),
-        wikipedia_url=wikipedia_search_url(headline),
-        wikipedia_label="Wikipedia search",
-        source_label="NYT article",
-        exact_match=True,
-    )
+    ranked = sorted(candidates, key=score_nyt_doc, reverse=True)
+    return Event(articles=[nyt_doc_to_article(doc, iso_date) for doc in ranked[:MAX_NYT_ARTICLES]], exact_match=True)
 
 
 def select_event(payload: dict, iso_date: str) -> Event:
@@ -419,12 +427,17 @@ def select_event(payload: dict, iso_date: str) -> Event:
     text = clean_event_text(chosen["text"])
     query = event_search_query(chosen)
     return Event(
-        year=int(chosen["year"]),
-        text=text,
-        url=wikipedia_page_url(page),
-        nyt_url=nyt_archive_url(query, iso_date),
-        tribune_url=tribune_archive_url(query, iso_date),
-        wikipedia_url=wikipedia_page_url(page),
+        articles=[
+            EventArticle(
+                title=f"Wikipedia event from {chosen['year']}",
+                summary=truncate_words(text, MAX_SUMMARY_WORDS),
+                url=wikipedia_page_url(page),
+                nyt_url=nyt_archive_url(query, iso_date),
+                wikipedia_url=wikipedia_page_url(page),
+                wikipedia_label="Wikipedia event",
+                source_label="Wikipedia event",
+            )
+        ],
         exact_match=exact_match,
     )
 
@@ -492,21 +505,25 @@ def event_block(label: str, iso_date: str, event: Event) -> str:
             "The NYT APIs did not return a usable exact-date article here, so this row falls back to a date-matched Wikipedia event."
             "</div>"
         )
+    article_parts = []
+    for article in event.articles:
+        summary_html = f'<div class="event-copy">{escape(article.summary)}</div>' if article.summary else ""
+        article_parts.append(
+            '<div class="event-article">'
+            f'<div class="event-title">{escape(article.title)}</div>'
+            f"{summary_html}"
+            '<div class="event-link">'
+            f'<a href="{escape(article.url)}">{escape(article.source_label)}</a> · '
+            f'<a href="{escape(article.nyt_url)}">NYT archive search</a> · '
+            f'<a href="{escape(article.wikipedia_url)}">{escape(article.wikipedia_label)}</a>'
+            "</div>"
+            "</div>"
+        )
     return (
         '<div class="event-block">'
         f'<div class="event-date">{escape(label)} · {escape(format_date(iso_date))}</div>'
-        f'<div class="event-copy">{escape(event.text)}</div>'
-        '<div class="event-link">'
-        + (
-            f'<a href="{escape(event.url)}">{escape(event.source_label)}</a> · '
-            if event.source_label
-            else ""
-        )
-        + f'<a href="{escape(event.nyt_url)}">NYT archive search</a> · '
-        f'<a href="{escape(event.tribune_url)}">Chicago Tribune archive</a> · '
-        f'<a href="{escape(event.wikipedia_url)}">{escape(event.wikipedia_label)}</a>'
-        "</div>"
-        f"{fallback_note}"
+        + "".join(article_parts)
+        + f"{fallback_note}"
         "</div>"
     )
 
@@ -962,8 +979,22 @@ def render_html(rows: list[dict]) -> str:
       font-size: 0.86rem;
     }}
 
+    .event-article + .event-article {{
+      margin-top: 14px;
+      padding-top: 14px;
+      border-top: 1px solid rgba(68, 52, 40, 0.12);
+    }}
+
+    .event-title {{
+      font-size: 0.98rem;
+      font-weight: 700;
+      line-height: 1.35;
+    }}
+
     .event-copy {{
+      margin-top: 6px;
       font-size: 0.95rem;
+      line-height: 1.45;
     }}
 
     .price-cell {{
@@ -1028,8 +1059,9 @@ def render_html(rows: list[dict]) -> str:
         <p>
           Passover dates come from Hebcal's diaspora holiday API. Weather is from Chicago daily-history
           pages at Extreme Weather Watch, with a NOAA daily-summaries fallback for the missing 1980
-          April 1-2 rows. Event blurbs use the top selected entry from Wikimedia's "On this day" feed
-          for each calendar date. Matzah prices are estimated by scaling a current shelf price with
+          April 1-2 rows. News coverage uses up to ten same-date New York Times articles per festival
+          day, ranked from the official NYT Archive API with an Article Search fallback only when
+          needed; summaries are trimmed to about 100 words. Matzah prices are estimated by scaling a current shelf price with
           annual CPI values published from BLS data at OfficialData.
         </p>
       </div>
@@ -1063,7 +1095,7 @@ def render_html(rows: list[dict]) -> str:
     <footer>
       <div>Generated locally on {escape(generated_on)}.</div>
       <div class="source-list">
-        <div>Sources: <a href="https://www.hebcal.com/hebcal?cfg=json&year=2025&maj=on&month=x&c=off&geo=none&m=50&s=off">Hebcal</a>, <a href="https://www.extremeweatherwatch.com/cities/chicago/day/april-13">Extreme Weather Watch</a>, <a href="https://www.ncei.noaa.gov/access/services/data/v1?dataset=daily-summaries&stations=USW00094846&startDate=1980-04-01&endDate=1980-04-01&dataTypes=TMAX,TMIN,PRCP,SNOW&units=standard&format=json">NOAA daily summaries</a>, <a href="https://developer.nytimes.com/docs/archive-product/1/overview">New York Times Archive API</a>, <a href="https://developer.nytimes.com/docs/articlesearch-product/1/overview">New York Times Article Search API</a>, <a href="https://api.wikimedia.org/feed/v1/wikipedia/en/onthisday/events/04/13">Wikimedia On This Day events</a>, <a href="https://chicagotribune.newspapers.com/search/?query=Passover+2025">Chicago Tribune archive</a>, <a href="{escape(BASE_PRICE_URL)}">Good Eggs</a>, <a href="https://www.officialdata.org/us-cpi">OfficialData CPI table</a>, <a href="https://www.bls.gov/data/inflation_calculator_inside.htm">BLS inflation calculator note</a>.</div>
+        <div>Sources: <a href="https://www.hebcal.com/hebcal?cfg=json&year=2025&maj=on&month=x&c=off&geo=none&m=50&s=off">Hebcal</a>, <a href="https://www.extremeweatherwatch.com/cities/chicago/day/april-13">Extreme Weather Watch</a>, <a href="https://www.ncei.noaa.gov/access/services/data/v1?dataset=daily-summaries&stations=USW00094846&startDate=1980-04-01&endDate=1980-04-01&dataTypes=TMAX,TMIN,PRCP,SNOW&units=standard&format=json">NOAA daily summaries</a>, <a href="https://developer.nytimes.com/docs/archive-product/1/overview">New York Times Archive API</a>, <a href="https://developer.nytimes.com/docs/articlesearch-product/1/overview">New York Times Article Search API</a>, <a href="https://api.wikimedia.org/feed/v1/wikipedia/en/onthisday/events/04/13">Wikimedia On This Day events</a>, <a href="{escape(BASE_PRICE_URL)}">Good Eggs</a>, <a href="https://www.officialdata.org/us-cpi">OfficialData CPI table</a>, <a href="https://www.bls.gov/data/inflation_calculator_inside.htm">BLS inflation calculator note</a>.</div>
         <div>Calendar note: this uses the first and second daytime festival dates in the diaspora calendar, not the prior evening seder start.</div>
       </div>
     </footer>
