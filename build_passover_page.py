@@ -532,6 +532,92 @@ def render_html(rows: list[dict]) -> str:
 
     .day-weather {{
       font-size: 0.96rem;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+      line-height: 1.35;
+    }}
+
+    .weather-temp-group {{
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      flex-wrap: wrap;
+    }}
+
+    .weather-temp {{
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 10px;
+      border-radius: 999px;
+      font-size: 0.86rem;
+      font-weight: 700;
+      letter-spacing: 0.01em;
+    }}
+
+    .weather-temp::before {{
+      content: "";
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: currentColor;
+      flex: 0 0 auto;
+    }}
+
+    .weather-temp-high {{
+      color: #8a1c1c;
+      background: rgba(193, 59, 59, 0.16);
+      border: 1px solid rgba(193, 59, 59, 0.22);
+    }}
+
+    .weather-temp-low {{
+      color: #184f8a;
+      background: rgba(58, 126, 193, 0.14);
+      border: 1px solid rgba(58, 126, 193, 0.2);
+    }}
+
+    .weather-divider,
+    .weather-unit {{
+      color: var(--muted);
+      font-size: 0.82rem;
+      font-weight: 600;
+    }}
+
+    .weather-badge {{
+      display: inline-flex;
+      align-items: center;
+      padding: 4px 9px;
+      border-radius: 999px;
+      font-size: 0.8rem;
+      font-weight: 600;
+      border: 1px solid transparent;
+      white-space: nowrap;
+    }}
+
+    .weather-rain {{
+      color: #155e75;
+      background: rgba(21, 94, 117, 0.12);
+      border-color: rgba(21, 94, 117, 0.18);
+    }}
+
+    .weather-dry {{
+      color: #556b2f;
+      background: rgba(138, 158, 91, 0.16);
+      border-color: rgba(138, 158, 91, 0.24);
+    }}
+
+    .weather-snow {{
+      color: #43556a;
+      background: rgba(210, 223, 235, 0.7);
+      border-color: rgba(125, 149, 171, 0.28);
+    }}
+
+    .weather-unknown {{
+      color: #6b5c4d;
+      background: rgba(110, 98, 85, 0.12);
+      border-color: rgba(110, 98, 85, 0.18);
     }}
 
     .source-note,
@@ -648,6 +734,75 @@ def render_html(rows: list[dict]) -> str:
       </div>
     </footer>
   </main>
+  <script>
+    (() => {{
+      const weatherPattern = /^(\d+)\s*\/\s*(\d+)\s*F(?:;\s*(.+))?$/;
+
+      function makeNode(tagName, className, text) {{
+        const node = document.createElement(tagName);
+        if (className) {{
+          node.className = className;
+        }}
+        if (text) {{
+          node.textContent = text;
+        }}
+        return node;
+      }}
+
+      function badgeClass(detail) {{
+        if (/^dry$/i.test(detail)) {{
+          return "weather-badge weather-dry";
+        }}
+        if (/rain/i.test(detail)) {{
+          return "weather-badge weather-rain";
+        }}
+        if (/snow/i.test(detail)) {{
+          return "weather-badge weather-snow";
+        }}
+        return "weather-badge weather-unknown";
+      }}
+
+      function badgeText(detail) {{
+        if (/^dry$/i.test(detail)) {{
+          return "No rain";
+        }}
+        if (/^precip n\\/a$/i.test(detail)) {{
+          return "Rain n/a";
+        }}
+        return detail;
+      }}
+
+      document.querySelectorAll(".day-weather").forEach((node) => {{
+        const raw = node.textContent.trim();
+        const match = raw.match(weatherPattern);
+        if (!match) {{
+          return;
+        }}
+
+        const [, high, low, detailText = ""] = match;
+        const details = detailText
+          .split(/\s*;\s*/)
+          .map((item) => item.trim())
+          .filter(Boolean);
+
+        node.textContent = "";
+        node.setAttribute("aria-label", raw);
+
+        const tempGroup = makeNode("span", "weather-temp-group");
+        tempGroup.append(
+          makeNode("span", "weather-temp weather-temp-high", `High ${high}`),
+          makeNode("span", "weather-divider", "/"),
+          makeNode("span", "weather-temp weather-temp-low", `Low ${low}`),
+          makeNode("span", "weather-unit", "F")
+        );
+        node.append(tempGroup);
+
+        details.forEach((detail) => {{
+          node.append(makeNode("span", badgeClass(detail), badgeText(detail)));
+        }});
+      }});
+    }})();
+  </script>
 </body>
 </html>
 """
