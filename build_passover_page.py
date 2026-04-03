@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from html import escape
 from pathlib import Path
+from urllib.parse import quote_plus
 
 import requests
 from bs4 import BeautifulSoup
@@ -31,9 +32,15 @@ class Weather:
 
 @dataclass
 class Event:
-    year: int
+    year: int | None
     text: str
     url: str
+    nyt_url: str
+    tribune_url: str
+    wikipedia_url: str
+    wikipedia_label: str = "Wikipedia"
+    source_label: str | None = None
+    exact_year: bool = True
 
 
 def get_json(session: requests.Session, url: str) -> dict | list:
@@ -123,22 +130,150 @@ def fetch_noaa_weather(session: requests.Session, iso_date: str) -> Weather:
     )
 
 
-def fetch_event(session: requests.Session, slug: str) -> Event:
+def format_search_date(iso_date: str) -> str:
+    return datetime.fromisoformat(iso_date).strftime("%Y%m%d")
+
+
+def nyt_archive_url(query: str, iso_date: str) -> str:
+    date_token = format_search_date(iso_date)
+    return (
+        "https://www.nytimes.com/search"
+        f"?dropmab=true&query={quote_plus(query)}&sort=best"
+        f"&startDate={date_token}&endDate={date_token}"
+    )
+
+
+def tribune_archive_url(query: str, iso_date: str) -> str:
+    year = datetime.fromisoformat(iso_date).year
+    return f"https://chicagotribune.newspapers.com/search/?query={quote_plus(f'{query} {year}')}"
+
+
+def wikipedia_search_url(query: str) -> str:
+    return f"https://en.wikipedia.org/wiki/Special:Search?search={quote_plus(query)}"
+
+
+def clean_event_text(text: str) -> str:
+    return (
+        text.replace("\xa0", " ")
+        .replace(" (pictured)", "")
+        .replace("(pictured) ", "")
+        .strip()
+    )
+
+
+def wikipedia_page_url(page: dict) -> str:
+    content_urls = page.get("content_urls", {})
+    desktop_urls = content_urls.get("desktop", {})
+    if desktop_urls.get("page"):
+        return desktop_urls["page"]
+    titles = page.get("titles", {})
+    canonical = titles.get("canonical") or page.get("title") or ""
+    return f"https://en.wikipedia.org/wiki/{canonical}"
+
+
+def event_search_query(item: dict) -> str:
+    pages = item.get("pages") or []
+    if pages:
+        titles = pages[0].get("titles", {})
+        title = titles.get("normalized") or titles.get("display") or pages[0].get("normalizedtitle")
+        if title:
+            return title
+    return clean_event_text(item["text"])
+
+
+def fetch_event_catalog(session: requests.Session, slug: str) -> dict:
     month_name, day_text = slug.split("-")
     month_number = datetime.strptime(month_name, "%B").month
     day_number = int(day_text)
     url = (
-        "https://api.wikimedia.org/feed/v1/wikipedia/en/onthisday/selected/"
+        "https://api.wikimedia.org/feed/v1/wikipedia/en/onthisday/all/"
         f"{month_number:02d}/{day_number:02d}"
     )
-    payload = get_json(session, url)
-    selected = payload["selected"][0]
-    page = selected["pages"][0]
-    text = selected["text"].replace("\xa0", " ")
+    return get_json(session, url)
+
+
+def nyt_issue_url(iso_date: str) -> str:
+    dt = datetime.fromisoformat(iso_date)
+    return (
+        "https://www.nytimes.com/issue/todayspaper/"
+        f"{dt.year:04d}/{dt.month:02d}/{dt.day:02d}/todays-new-york-times"
+    )
+
+
+def fetch_nyt_issue_item(session: requests.Session, iso_date: str) -> Event | None:
+    dt = datetime.fromisoformat(iso_date)
+    if dt.year < 2018:
+        return None
+
+    url = nyt_issue_url(iso_date)
+    response = session.get(url, timeout=30)
+    if response.status_code != 200:
+        return None
+
+    soup = BeautifulSoup(response.text, "html.parser")
+    for anchor in soup.select("a[href]"):
+        href = anchor.get("href", "")
+        if not href.startswith(f"/{dt.year:04d}/"):
+            continue
+        headline_node = anchor.find(["h2", "h3", "h4"])
+        if headline_node is None:
+            continue
+        headline = " ".join(headline_node.get_text(" ", strip=True).split())
+        if not headline:
+            continue
+        article_url = href if href.startswith("http") else f"https://www.nytimes.com{href}"
+        summary = ""
+        for paragraph in anchor.find_all("p"):
+            text = " ".join(paragraph.get_text(" ", strip=True).split())
+            if text and not text.startswith("By "):
+                summary = text
+                break
+        item_text = headline if not summary or summary == headline else f"{headline} {summary}"
+        return Event(
+            year=dt.year,
+            text=item_text,
+            url=article_url,
+            nyt_url=nyt_archive_url(headline, iso_date),
+            tribune_url=tribune_archive_url(headline, iso_date),
+            wikipedia_url=wikipedia_search_url(headline),
+            wikipedia_label="Wikipedia search",
+            source_label="NYT in print",
+        )
+
+    return None
+
+
+def select_event(payload: dict, iso_date: str) -> Event:
+    target_year = datetime.fromisoformat(iso_date).year
+
+    def with_pages(items: list[dict]) -> list[dict]:
+        return [item for item in items if item.get("pages")]
+
+    exact_events = with_pages([item for item in payload.get("events", []) if int(item["year"]) == target_year])
+    exact_selected = with_pages([item for item in payload.get("selected", []) if int(item["year"]) == target_year])
+
+    if exact_events:
+        chosen = max(exact_events, key=lambda item: (len(item.get("pages", [])), len(item["text"])))
+        exact_year = True
+    elif exact_selected:
+        chosen = max(exact_selected, key=lambda item: (len(item.get("pages", [])), len(item["text"])))
+        exact_year = True
+    else:
+        fallback_pool = with_pages(payload.get("selected", [])) or with_pages(payload.get("events", []))
+        chosen = min(fallback_pool, key=lambda item: abs(int(item["year"]) - target_year))
+        exact_year = False
+
+    page = chosen["pages"][0]
+    text = clean_event_text(chosen["text"])
+    query = event_search_query(chosen)
     return Event(
-        year=int(selected["year"]),
+        year=int(chosen["year"]),
         text=text,
-        url=page["content_urls"]["desktop"]["page"],
+        url=wikipedia_page_url(page),
+        nyt_url=nyt_archive_url(query, iso_date),
+        tribune_url=tribune_archive_url(query, iso_date),
+        wikipedia_url=wikipedia_page_url(page),
+        exact_year=exact_year,
     )
 
 
@@ -198,11 +333,28 @@ def weather_block(label: str, iso_date: str, weather: Weather) -> str:
 
 
 def event_block(label: str, iso_date: str, event: Event) -> str:
+    fallback_note = ""
+    if not event.exact_year:
+        fallback_note = (
+            '<div class="source-note">'
+            "Wikipedia does not list a same-year event for this date; archive searches still target the date shown."
+            "</div>"
+        )
     return (
         '<div class="event-block">'
         f'<div class="event-date">{escape(label)} · {escape(format_date(iso_date))}</div>'
-        f'<div class="event-copy">{escape(str(event.year))}: {escape(event.text)}</div>'
-        f'<div class="event-link"><a href="{escape(event.url)}">Wikipedia article</a></div>'
+        f'<div class="event-copy">{escape(event.text)}</div>'
+        '<div class="event-link">'
+        + (
+            f'<a href="{escape(event.url)}">{escape(event.source_label)}</a> · '
+            if event.source_label
+            else ""
+        )
+        + f'<a href="{escape(event.nyt_url)}">NYT archive search</a> · '
+        f'<a href="{escape(event.tribune_url)}">Chicago Tribune archive</a> · '
+        f'<a href="{escape(event.wikipedia_url)}">{escape(event.wikipedia_label)}</a>'
+        "</div>"
+        f"{fallback_note}"
         "</div>"
     )
 
@@ -214,7 +366,7 @@ def build_rows(session: requests.Session) -> list[dict]:
         | {iso_to_slug(row["day2"]) for row in passover_rows}
     )
     weather_cache = {slug: fetch_weather_table(session, slug) for slug in unique_slugs}
-    event_cache = {slug: fetch_event(session, slug) for slug in unique_slugs}
+    event_cache = {slug: fetch_event_catalog(session, slug) for slug in unique_slugs}
     cpi = fetch_cpi(session)
     base_price = fetch_base_price(session)
 
@@ -225,6 +377,8 @@ def build_rows(session: requests.Session) -> list[dict]:
         day1_weather = weather_cache[day1_slug].get(row["year"]) or fetch_noaa_weather(session, row["day1"])
         day2_weather = weather_cache[day2_slug].get(row["year"]) or fetch_noaa_weather(session, row["day2"])
         estimated_price, cpi_month = price_for_year(base_price, cpi, row["day1"])
+        day1_news = fetch_nyt_issue_item(session, row["day1"]) or select_event(event_cache[day1_slug], row["day1"])
+        day2_news = fetch_nyt_issue_item(session, row["day2"]) or select_event(event_cache[day2_slug], row["day2"])
         rows.append(
             {
                 "year": row["year"],
@@ -233,8 +387,8 @@ def build_rows(session: requests.Session) -> list[dict]:
                 "day2": row["day2"],
                 "day1_weather": day1_weather,
                 "day2_weather": day2_weather,
-                "day1_event": event_cache[day1_slug],
-                "day2_event": event_cache[day2_slug],
+                "day1_event": day1_news,
+                "day2_event": day2_news,
                 "estimated_price": estimated_price,
                 "cpi_month": cpi_month,
             }
@@ -716,7 +870,7 @@ def render_html(rows: list[dict]) -> str:
             <th>Year</th>
             <th>Passover Day 1</th>
             <th>Passover Day 2</th>
-            <th>Interesting Events On Those Dates</th>
+            <th>In The News On Those Dates</th>
             <th>Estimated Matzah Box Price</th>
           </tr>
         </thead>
@@ -729,14 +883,14 @@ def render_html(rows: list[dict]) -> str:
     <footer>
       <div>Generated locally on {escape(generated_on)}.</div>
       <div class="source-list">
-        <div>Sources: <a href="https://www.hebcal.com/hebcal?cfg=json&year=2025&maj=on&month=x&c=off&geo=none&m=50&s=off">Hebcal</a>, <a href="https://www.extremeweatherwatch.com/cities/chicago/day/april-13">Extreme Weather Watch</a>, <a href="https://www.ncei.noaa.gov/access/services/data/v1?dataset=daily-summaries&stations=USW00094846&startDate=1980-04-01&endDate=1980-04-01&dataTypes=TMAX,TMIN,PRCP,SNOW&units=standard&format=json">NOAA daily summaries</a>, <a href="https://api.wikimedia.org/feed/v1/wikipedia/en/onthisday/selected/04/13">Wikimedia On This Day</a>, <a href="{escape(BASE_PRICE_URL)}">Good Eggs</a>, <a href="https://www.officialdata.org/us-cpi">OfficialData CPI table</a>, <a href="https://www.bls.gov/data/inflation_calculator_inside.htm">BLS inflation calculator note</a>.</div>
+        <div>Sources: <a href="https://www.hebcal.com/hebcal?cfg=json&year=2025&maj=on&month=x&c=off&geo=none&m=50&s=off">Hebcal</a>, <a href="https://www.extremeweatherwatch.com/cities/chicago/day/april-13">Extreme Weather Watch</a>, <a href="https://www.ncei.noaa.gov/access/services/data/v1?dataset=daily-summaries&stations=USW00094846&startDate=1980-04-01&endDate=1980-04-01&dataTypes=TMAX,TMIN,PRCP,SNOW&units=standard&format=json">NOAA daily summaries</a>, <a href="https://www.nytimes.com/issue/todayspaper/2025/04/13/todays-new-york-times">New York Times in-print issue pages</a>, <a href="https://api.wikimedia.org/feed/v1/wikipedia/en/onthisday/events/04/13">Wikimedia On This Day events</a>, <a href="https://www.nytimes.com/search?dropmab=true&query=Passover&sort=best&startDate=20250413&endDate=20250413">New York Times search archive</a>, <a href="https://chicagotribune.newspapers.com/search/?query=Passover+2025">Chicago Tribune archive</a>, <a href="{escape(BASE_PRICE_URL)}">Good Eggs</a>, <a href="https://www.officialdata.org/us-cpi">OfficialData CPI table</a>, <a href="https://www.bls.gov/data/inflation_calculator_inside.htm">BLS inflation calculator note</a>.</div>
         <div>Calendar note: this uses the first and second daytime festival dates in the diaspora calendar, not the prior evening seder start.</div>
       </div>
     </footer>
   </main>
   <script>
     (() => {{
-      const weatherPattern = /^(\d+)\s*\/\s*(\d+)\s*F(?:;\s*(.+))?$/;
+      const weatherPattern = /^(\\d+)\\s*\\/\\s*(\\d+)\\s*F(?:;\\s*(.+))?$/;
 
       function makeNode(tagName, className, text) {{
         const node = document.createElement(tagName);
@@ -781,7 +935,7 @@ def render_html(rows: list[dict]) -> str:
 
         const [, high, low, detailText = ""] = match;
         const details = detailText
-          .split(/\s*;\s*/)
+          .split(/\\s*;\\s*/)
           .map((item) => item.trim())
           .filter(Boolean);
 
@@ -790,9 +944,9 @@ def render_html(rows: list[dict]) -> str:
 
         const tempGroup = makeNode("span", "weather-temp-group");
         tempGroup.append(
-          makeNode("span", "weather-temp weather-temp-high", `High ${high}`),
+          makeNode("span", "weather-temp weather-temp-high", `High ${{high}}`),
           makeNode("span", "weather-divider", "/"),
-          makeNode("span", "weather-temp weather-temp-low", `Low ${low}`),
+          makeNode("span", "weather-temp weather-temp-low", `Low ${{low}}`),
           makeNode("span", "weather-unit", "F")
         );
         node.append(tempGroup);
