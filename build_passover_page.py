@@ -505,8 +505,10 @@ def event_block(label: str, iso_date: str, event: Event) -> str:
             "The NYT APIs did not return a usable exact-date article here, so this row falls back to a date-matched Wikipedia event."
             "</div>"
         )
+    title_items = []
     article_parts = []
     for article in event.articles:
+        title_items.append(f'<span class="event-title-item">{escape(article.title)}</span>')
         summary_html = f'<div class="event-copy">{escape(article.summary)}</div>' if article.summary else ""
         article_parts.append(
             '<div class="event-article">'
@@ -522,7 +524,16 @@ def event_block(label: str, iso_date: str, event: Event) -> str:
     return (
         '<div class="event-block">'
         f'<div class="event-date">{escape(label)} · {escape(format_date(iso_date))}</div>'
+        + '<details class="event-disclosure">'
+        + '<summary class="event-summary">'
+        + '<span class="event-summary-label">Titles</span>'
+        + f'<span class="event-summary-count">{len(event.articles)}</span>'
+        + f'<span class="event-title-list">{"".join(title_items)}</span>'
+        + "</summary>"
+        + '<div class="event-expanded">'
         + "".join(article_parts)
+        + "</div>"
+        + "</details>"
         + f"{fallback_note}"
         "</div>"
     )
@@ -977,6 +988,73 @@ def render_html(rows: list[dict]) -> str:
       margin-top: 6px;
       color: var(--muted);
       font-size: 0.86rem;
+    }}
+
+    .event-disclosure {{
+      margin-top: 6px;
+      border: 1px solid rgba(68, 52, 40, 0.12);
+      border-radius: 14px;
+      background: rgba(255, 252, 246, 0.72);
+      overflow: hidden;
+    }}
+
+    .event-summary {{
+      display: block;
+      cursor: pointer;
+      padding: 12px 14px;
+      list-style: none;
+    }}
+
+    .event-summary::-webkit-details-marker {{
+      display: none;
+    }}
+
+    .event-summary-label,
+    .event-summary-count {{
+      display: inline-block;
+      vertical-align: middle;
+    }}
+
+    .event-summary-label {{
+      color: var(--muted);
+      font-size: 0.76rem;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }}
+
+    .event-summary-count {{
+      margin-left: 8px;
+      padding: 2px 8px;
+      border-radius: 999px;
+      background: rgba(189, 122, 54, 0.14);
+      color: var(--accent);
+      font-size: 0.78rem;
+      font-weight: 700;
+    }}
+
+    .event-title-list {{
+      display: grid;
+      margin-top: 10px;
+      gap: 6px;
+      font-size: 0.94rem;
+      line-height: 1.35;
+    }}
+
+    .event-title-item {{
+      display: block;
+      padding-left: 14px;
+      position: relative;
+    }}
+
+    .event-title-item::before {{
+      content: "•";
+      position: absolute;
+      left: 0;
+      color: var(--accent);
+    }}
+
+    .event-expanded {{
+      padding: 0 14px 14px;
     }}
 
     .event-article + .event-article {{
