@@ -500,34 +500,16 @@ def event_block(label: str, iso_date: str, event: Event) -> str:
             "The NYT APIs did not return a usable exact-date article here, so this row falls back to a date-matched Wikipedia event."
             "</div>"
         )
-    title_items = []
-    article_parts = []
-    for article in event.articles:
-        title_items.append(f'<span class="event-title-item">{escape(article.title)}</span>')
-        summary_html = f'<div class="event-copy">{escape(article.summary)}</div>' if article.summary else ""
-        article_parts.append(
-            '<div class="event-article">'
-            f'<div class="event-title">{escape(article.title)}</div>'
-            f"{summary_html}"
-            '<div class="event-link">'
-            f'<a href="{escape(article.url)}">{escape(article.source_label)}</a> · '
-            f'<a href="{escape(article.nyt_url)}">NYT archive search</a>'
-            "</div>"
-            "</div>"
-        )
+    title_items = [
+        '<div class="event-item">'
+        f'<a href="{escape(article.url)}">{escape(article.title)}</a>'
+        "</div>"
+        for article in event.articles
+    ]
     return (
         '<div class="event-block">'
         f'<div class="event-date">{escape(label)} · {escape(format_date(iso_date))}</div>'
-        + '<details class="event-disclosure">'
-        + '<summary class="event-summary">'
-        + '<span class="event-summary-label">Click to expand article titles</span>'
-        + f'<span class="event-summary-count">{len(event.articles)}</span>'
-        + f'<span class="event-title-list">{"".join(title_items)}</span>'
-        + "</summary>"
-        + '<div class="event-expanded">'
-        + "".join(article_parts)
-        + "</div>"
-        + "</details>"
+        + f'<div class="event-list">{"".join(title_items)}</div>'
         + f"{fallback_note}"
         "</div>"
     )
@@ -977,120 +959,41 @@ def render_html(rows: list[dict]) -> str:
     }}
 
     .source-note,
-    .price-note,
-    .event-link {{
+    .price-note {{
       margin-top: 6px;
       color: var(--muted);
       font-size: 0.86rem;
     }}
 
-    .event-disclosure {{
+    .event-list {{
       margin-top: 6px;
-      border: 1px solid rgba(68, 52, 40, 0.12);
-      border-radius: 14px;
-      background: rgba(255, 252, 246, 0.72);
-      overflow: hidden;
-    }}
-
-    .event-summary {{
-      display: block;
-      cursor: pointer;
-      padding: 12px 14px;
-      list-style: none;
-      position: relative;
-      padding-right: 44px;
-    }}
-
-    .event-summary::-webkit-details-marker {{
-      display: none;
-    }}
-
-    .event-summary::after {{
-      content: "+";
-      position: absolute;
-      top: 12px;
-      right: 14px;
-      width: 22px;
-      height: 22px;
-      border-radius: 999px;
-      border: 1px solid rgba(189, 122, 54, 0.26);
-      color: var(--accent);
-      font-size: 1rem;
-      font-weight: 700;
-      line-height: 20px;
-      text-align: center;
-      background: rgba(189, 122, 54, 0.08);
-    }}
-
-    .event-disclosure[open] .event-summary::after {{
-      content: "−";
-    }}
-
-    .event-summary-label,
-    .event-summary-count {{
-      display: inline-block;
-      vertical-align: middle;
-    }}
-
-    .event-summary-label {{
-      color: var(--accent);
-      font-size: 0.78rem;
-      font-weight: 700;
-      letter-spacing: 0.08em;
-      text-transform: uppercase;
-    }}
-
-    .event-summary-count {{
-      margin-left: 8px;
-      padding: 2px 8px;
-      border-radius: 999px;
-      background: rgba(189, 122, 54, 0.14);
-      color: var(--accent);
-      font-size: 0.78rem;
-      font-weight: 700;
-    }}
-
-    .event-title-list {{
       display: grid;
-      margin-top: 10px;
-      gap: 6px;
+      gap: 8px;
       font-size: 0.94rem;
       line-height: 1.35;
     }}
 
-    .event-title-item {{
-      display: block;
+    .event-item {{
       padding-left: 14px;
       position: relative;
     }}
 
-    .event-title-item::before {{
+    .event-item::before {{
       content: "•";
       position: absolute;
       left: 0;
       color: var(--accent);
     }}
 
-    .event-expanded {{
-      padding: 0 14px 14px;
+    .event-item a {{
+      color: var(--ink);
+      text-decoration: none;
+      font-weight: 600;
     }}
 
-    .event-article + .event-article {{
-      margin-top: 14px;
-      padding-top: 14px;
-      border-top: 1px solid rgba(68, 52, 40, 0.12);
-    }}
-
-    .event-title {{
-      font-size: 0.98rem;
-      font-weight: 700;
-      line-height: 1.35;
-    }}
-
-    .event-copy {{
-      margin-top: 6px;
-      font-size: 0.95rem;
-      line-height: 1.45;
+    .event-item a:hover {{
+      color: var(--accent);
+      text-decoration: underline;
     }}
 
     .price-cell {{
@@ -1211,11 +1114,11 @@ def render_html(rows: list[dict]) -> str:
   <main>
     <section class="hero">
       <div class="eyebrow">Chicago · Pesach · Weather History</div>
-      <h1>Fifty Chicago Passovers, with weather, date-linked history, and a matzah price estimate.</h1>
+      <h1>Fifty Chicago Passovers, with weather, linked NYT headlines, and a matzah price estimate.</h1>
       <p>
         This table covers the last 50 completed Passovers in Chicago, from 1976 through 2025.
         Each row includes the first two festival days in the diaspora calendar, observed Chicago weather,
-        two linked "on this day" events, and an estimated nominal price for a regular 1 lb box of
+        linked New York Times headlines for those dates, and an estimated nominal price for a regular 1 lb box of
         Manischewitz Original Passover Matzo.
       </p>
     </section>
@@ -1232,7 +1135,7 @@ def render_html(rows: list[dict]) -> str:
           pages at Extreme Weather Watch, with a NOAA daily-summaries fallback for the missing 1980
           April 1-2 rows. News coverage uses up to ten same-date New York Times articles per festival
           day, ranked from the official NYT Archive API with an Article Search fallback only when
-          needed; summaries are trimmed to about 100 words. Matzah prices are estimated by scaling a current shelf price with
+          needed. Matzah prices are estimated by scaling a current shelf price with
           annual CPI values published from BLS data at OfficialData.
         </p>
       </div>
