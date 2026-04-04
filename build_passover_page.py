@@ -641,15 +641,15 @@ def render_table(rows: list[dict]) -> str:
     parts = []
     for row in rows:
         parts.append(
-            "<tr>"
-            f'<td class="year-cell"><a href="{escape(row["hebcal_link"])}">{row["year"]}</a></td>'
-            f"<td>{weather_block('Day 1', row['day1'], row['day1_weather'])}</td>"
-            f"<td>{weather_block('Day 2', row['day2'], row['day2_weather'])}</td>"
-            "<td>"
+            '<tr class="year-row">'
+            f'<td class="year-cell" data-label="Year"><a href="{escape(row["hebcal_link"])}">{row["year"]}</a></td>'
+            f'<td data-label="Passover Day 1">{weather_block("Day 1", row["day1"], row["day1_weather"])}</td>'
+            f'<td data-label="Passover Day 2">{weather_block("Day 2", row["day2"], row["day2_weather"])}</td>'
+            '<td data-label="In The News On Those Dates">'
             f"{event_block('Day 1', row['day1'], row['day1_event'])}"
             f"{event_block('Day 2', row['day2'], row['day2_event'])}"
             "</td>"
-            '<td class="price-cell">'
+            '<td class="price-cell" data-label="Estimated Matzah Box Price">'
             f'<div class="price">${row["estimated_price"]:.2f}</div>'
             f'<div class="price-note">CPI year used: {escape(row["cpi_month"])}</div>'
             "</td>"
@@ -1128,6 +1128,81 @@ def render_html(rows: list[dict]) -> str:
       .stats,
       .notes {{
         grid-template-columns: 1fr;
+      }}
+
+      .table-wrap {{
+        padding: 10px;
+        overflow: visible;
+      }}
+
+      table {{
+        min-width: 0;
+      }}
+    }}
+
+    @media (max-width: 760px) {{
+      .table-wrap {{
+        background: transparent;
+        border: none;
+        box-shadow: none;
+        padding: 0;
+      }}
+
+      table,
+      tbody,
+      tr,
+      td {{
+        display: block;
+        width: 100%;
+      }}
+
+      thead {{
+        display: none;
+      }}
+
+      tbody {{
+        display: grid;
+        gap: 16px;
+      }}
+
+      tbody tr {{
+        background: var(--paper);
+        border: 1px solid var(--line);
+        border-radius: 24px;
+        box-shadow: var(--shadow);
+        overflow: hidden;
+      }}
+
+      tbody tr:nth-child(odd) {{
+        background: var(--paper);
+      }}
+
+      tbody td {{
+        border-bottom: 1px solid var(--line);
+        padding: 14px 16px 16px;
+      }}
+
+      tbody td:last-child {{
+        border-bottom: none;
+      }}
+
+      tbody td::before {{
+        content: attr(data-label);
+        display: block;
+        margin-bottom: 10px;
+        color: var(--muted);
+        font-size: 0.76rem;
+        font-weight: 700;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+      }}
+
+      .year-cell {{
+        font-size: 1.35rem;
+      }}
+
+      .year-cell::before {{
+        margin-bottom: 6px;
       }}
     }}
   </style>
